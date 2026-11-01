@@ -12,10 +12,7 @@ name: registry-cache
 
 services:
   cache:
-    build:
-      context: .
-      args:
-        REGISTRY_IMAGE: ${REGISTRY_IMAGE:-registry:2}
+    image: ameer1234567890/docker-registry-cache:latest
     image: registry-cache:latest
     init: true
     restart: unless-stopped
