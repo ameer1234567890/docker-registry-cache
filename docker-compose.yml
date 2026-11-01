@@ -13,7 +13,6 @@ name: registry-cache
 services:
   cache:
     image: ameer1234567890/docker-registry-cache:latest
-    image: registry-cache:latest
     init: true
     restart: unless-stopped
     ports:
