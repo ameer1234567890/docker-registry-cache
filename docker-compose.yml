@@ -1,0 +1,68 @@
+name: registry-cache
+
+# One container that transparently caches several registries on port 443.
+#
+# Clients keep using the real names. DNS (or /etc/hosts) on the client points them here:
+#
+#   docker pull ghcr.io/owner/app   ─▶ ghcr.io     ─┐
+#   docker pull quay.io/org/app     ─▶ quay.io      ├─▶ this container :443 ─▶ per-registry cache ─▶ upstream
+#   docker pull alpine              ─▶ registry-1.docker.io ─┘     (chosen by TLS server name)
+#
+#   any other name / IP ─▶ web UI (also plain http://<host>:8080)
+
+services:
+  cache:
+    build:
+      context: .
+      args:
+        REGISTRY_IMAGE: ${REGISTRY_IMAGE:-registry:2}
+    image: registry-cache:latest
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${BIND_ADDR:-0.0.0.0}:443:443"                  # every registry, TLS
+      - "${BIND_ADDR:-0.0.0.0}:${UI_PORT:-8080}:8080"    # web UI, plain HTTP
+
+    # IMPORTANT: the cache must resolve ghcr.io, quay.io, ... to their REAL addresses.
+    # If these resolvers also carry your override records, requests would loop back to the cache.
+    dns:
+      - ${UPSTREAM_DNS:-1.1.1.1}
+      - ${UPSTREAM_DNS_2:-8.8.8.8}
+
+    environment:
+      CACHE_TTL: ${CACHE_TTL:-720h}
+      LOG_LEVEL: ${LOG_LEVEL:-warn}
+      # Only used when no server certificate is provided (see README).
+      TLS_SANS: ${TLS_SANS:-}
+      TLS_REGENERATE: ${TLS_REGENERATE:-false}
+      TLS_CA_DAYS: ${TLS_CA_DAYS:-3650}
+      TLS_CERT_DAYS: ${TLS_CERT_DAYS:-825}
+      SCAN_TTL: ${UI_SCAN_TTL:-30}
+      # Deleting from the web UI. Set the token to require it, or turn deletion off completely.
+      UI_ALLOW_DELETE: ${UI_ALLOW_DELETE:-true}
+      UI_ADMIN_TOKEN: ${UI_ADMIN_TOKEN:-}
+      # Docker Hub login. Anonymous pulls are rate limited per IP address, and the whole cache shares
+      # one address, so authenticate it. Use an access token as the password
+      # (hub.docker.com > Account settings > Personal access tokens, read-only is enough).
+      HUB_USERNAME: ${HUB_USERNAME:-}
+      HUB_PASSWORD: ${HUB_PASSWORD:-}
+      # Outbound proxy for the cache's own upstream traffic (optional).
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1}
+    # Logins for the other registries (GHCR_USERNAME, GHCR_PASSWORD, ...). Docker Hub is set above.
+    env_file:
+      - path: ./credentials.env
+        required: false
+
+    volumes:
+      - ${CACHE_DATA_DIR:-./data}:/data
+      # Your certificate: server.crt (full chain) + server.key, optionally ca.crt.
+      # Add :ro when you provide them yourself. Leave rw to auto-generate (see README).
+      - ${CERTS_DIR:-./certs}:/certs
+      # Extra root CAs to trust when talking to upstream registries (TLS-inspecting proxies, ...).
+      - ${UPSTREAM_CA_DIR:-./certs/upstream}:/upstream-ca:ro
+      # Which registries to cache; edit without rebuilding.
+      - ./registries.conf:/etc/registry-cache/registries.conf:ro
+      # Friendly names for client IP addresses in the pull history (optional).
+      - ./clients.conf:/etc/registry-cache/clients.conf:ro

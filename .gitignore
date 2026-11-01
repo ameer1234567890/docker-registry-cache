@@ -1,0 +1,6 @@
+.env
+credentials.env
+certs/*.key
+certs/*.srl
+certs/.generated
+data/
