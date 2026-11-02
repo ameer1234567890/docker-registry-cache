@@ -44,7 +44,7 @@ If both `server.crt` and `server.key` exist, they are used exactly as they are. 
       - /etc/ssl/mine/privkey.pem:/certs/server.key:ro
 ```
 
-**The certificate must list every registry hostname** as a subject alternative name, because clients connect to `ghcr.io`, not to your server's name. For the default `registries.conf`:
+**The certificate must list every registry hostname** as a subject alternative name, because clients connect to `ghcr.io`, not to your server's name. For the default registry list:
 
 ```
 registry-1.docker.io  ghcr.io  quay.io  gcr.io  registry.k8s.io  mcr.microsoft.com
@@ -60,21 +60,24 @@ done
 
 ### No certificate yet?
 
-Leave `certs/` empty (and writable) and the container creates a root CA (`ca.crt`, `ca.key`) and a server certificate covering every name in `registries.conf`. If you only have a root (`ca.crt` + `ca.key`), put those in and it signs the server certificate with your root. A generated certificate is reissued when the registry list or `TLS_SANS` changes, 30 days before it expires, or when `TLS_REGENERATE=true`. A `ca.crt` without `ca.key` (and no server certificate) stops the container with an explanation instead of overwriting anything.
+Leave `certs/` empty (and writable) and the container creates a root CA (`ca.crt`, `ca.key`) and a server certificate covering every registry in your list. If you only have a root (`ca.crt` + `ca.key`), put those in and it signs the server certificate with your root. A generated certificate is reissued when the registry list or `TLS_SANS` changes, 30 days before it expires, or when `TLS_REGENERATE=true`. A `ca.crt` without `ca.key` (and no server certificate) stops the container with an explanation instead of overwriting anything.
 
 The web UI runs as an unprivileged user and can only read a public copy of `ca.crt`, never a key.
 
 ## Choosing the registries
 
-Edit `registries.conf`, one line per registry (`id | display name | upstream URL`):
+The list lives in `docker-compose.yml`, in the `CACHE_REGISTRIES` setting, one line per registry (`id | display name | upstream URL`). There is no separate file to maintain: if you leave the setting out, the image falls back to the same six built-in registries (Docker Hub, GHCR, Quay, GCR, registry.k8s.io, MCR).
 
-```
-ghcr|GitHub Container Registry|https://ghcr.io
-internal|Our registry|https://registry.corp.example
-us-gcr|Google, US|https://us.gcr.io
+```yaml
+      CACHE_REGISTRIES: |
+        hub|Docker Hub|https://registry-1.docker.io
+        ghcr|GitHub Container Registry|https://ghcr.io
+        # quay|Quay|https://quay.io        <- a leading # switches a line off
+        internal|Our registry|https://registry.corp.example
+        us-gcr|Google, US|https://us.gcr.io
 ```
 
-The **hostname** in the URL is what clients type and what nginx routes on, so it must have no port and no path. The id is just a label and the data folder (`./data/<id>`). After editing, run `docker compose up -d --force-recreate`, add the new name to your client DNS, and make sure your certificate covers it.
+The **hostname** in the URL is what clients type and what nginx routes on, so it must have no port and no path. The id is just a label and the data folder (`./data/<id>`). The container refuses to start, with a message naming the line, if a hostname has a port, an id is invalid, or a hostname appears twice. After editing, run `docker compose up -d`, add the new name to your client DNS, and make sure your certificate covers it.
 
 ## Client setup (system-wide)
 
@@ -274,6 +277,7 @@ Set in `.env` (see `.env.example`).
 | `UPSTREAM_CA_DIR`              | `./certs/upstream` | Extra roots to trust when talking to upstream registries                 |
 | `CACHE_DATA_DIR`               | `./data`           | Cached blobs, one sub-folder per registry                                |
 | `CACHE_TTL`                    | `720h`             | Evict items this long after they were fetched (`0` = never)              |
+| `LOG_LEVEL`                    | `error`            | Log level of the registries (see below)                                  |
 | `UI_ALLOW_DELETE`              | `true`             | `false` switches deleting from the UI off completely                     |
 | `UI_ADMIN_TOKEN`               | _(empty)_          | If set, required to delete from the UI                                   |
 | `TLS_SANS`                     | _(empty)_          | Extra names/IPs, only for a generated certificate                        |
@@ -308,6 +312,15 @@ GHCR_PASSWORD=ghp_xxxxxxxxxxxxxxxx
 
 The same rule applies: anyone who can reach the cache can read what these credentials can read.
 
+### Registry log messages
+
+The registries log at `error` by default. At `warn` you would see two messages at every start, once per registry, that are expected in cache mode and do not mean anything is wrong:
+
+- `Registry does not implement RepositoryRemover. Will not be able to delete repos and tags`: the registry reports that a pull-through cache does not support deleting repositories and tags through its HTTP API. Nothing here uses that API. The web UI removes cached files itself, and expiry (`CACHE_TTL`) is handled inside the cache.
+- `No HTTP secret provided - generated random secret`: only matters for resumable uploads, which a cache never receives. The container now supplies a secret, so this one no longer appears.
+
+Set `LOG_LEVEL=warn` (or `info`) in `.env` if you want to see them or investigate a problem. Real failures, such as an upstream that is unreachable or rejects the login, are logged at `error` and always show.
+
 ## Maintenance
 
 - **Clear a registry or the whole cache:** use the delete buttons in the UI. From the command line: `docker compose stop && rm -rf data/ghcr/docker && docker compose start`.
@@ -317,7 +330,7 @@ The same rule applies: anyone who can reach the cache can read what these creden
 ## Limitations
 
 - **A name pointed at the cache is only a registry for those clients.** Anything else at that name (for example the quay.io website in a browser) will not work from a client that resolves it to the cache. Registry API traffic (`/v2/…`) is unaffected.
-- Registry names that have no entry in `registries.conf` (for example `us.gcr.io`, `docker.elastic.co`) are not cached. Add a line for each one you use. Wildcard hosts need one entry per hostname.
+- Registry names that are not in `CACHE_REGISTRIES` (for example `us.gcr.io`, `docker.elastic.co`) are not cached. Add a line for each one you use. Wildcard hosts need one entry per hostname.
 - Pull-through only; pushing is not possible by design.
 - One container means one failure domain: if any internal process exits, the container stops and Docker restarts all of them.
 - `registry:2` expires cached items `CACHE_TTL` after they were fetched (not after they were last used); a later pull fetches them again. Raise it, or set `0`, for a long-lived cache and watch the disk meter in the UI.
