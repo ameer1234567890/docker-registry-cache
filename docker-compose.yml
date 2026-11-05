@@ -1,4 +1,4 @@
-name: registry-cache
+name: docker-registry-cache
 
 # One container that transparently caches several registries on port 443.
 #
@@ -11,8 +11,12 @@ name: registry-cache
 #   any other name / IP ─▶ web UI (also plain http://<host>:8080)
 
 services:
-  cache:
-    image: ameer1234567890/docker-registry-cache:latest
+  docker-registry-cache:
+    container_name: docker-registry-cache
+    # Pulled from Docker Hub. To run a build of this source tree instead, build it under the same name
+    # first (docker build -t ameer1234567890/docker-registry-cache:latest .); Compose uses a local image
+    # when one exists, and `docker compose pull` fetches the published one again.
+    image: ${REGISTRY_IMAGE:-ameer1234567890/docker-registry-cache:latest}
     init: true
     restart: unless-stopped
     ports:

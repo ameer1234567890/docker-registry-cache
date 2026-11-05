@@ -1,0 +1,8 @@
+# Keep secrets and cache data out of the build context (and so out of any image you publish).
+.env
+credentials.env
+certs
+data
+.git
+**/__pycache__
+README.md

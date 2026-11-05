@@ -1,7 +1,7 @@
 # One image, one container: registry:2 (pull-through, one process per upstream),
 # nginx (TLS on a single port, routes by hostname) and the web UI.
-ARG REGISTRY_IMAGE=registry:2
-FROM ${REGISTRY_IMAGE} AS registry
+ARG REGISTRY_BASE_IMAGE=registry:2
+FROM ${REGISTRY_BASE_IMAGE} AS registry
 
 FROM nginx:1.27-alpine
 RUN apk add --no-cache openssl python3 su-exec ca-certificates \
