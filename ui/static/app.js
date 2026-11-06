@@ -212,14 +212,20 @@
       ? `on disk across ${plural(regs.length, 'registry')}, holding ${plural(images, 'image')} and ${plural(tags, 'tag')}.`
       : `on disk for ${esc(regs[0] ? regs[0].name : '')}, holding ${plural(images, 'image')} and ${plural(tags, 'tag')}.`;
     const pct = d && d.total ? Math.min(100, (d.used / d.total) * 100) : 0;
+    // The size limit applies to the whole cache, whichever registry is selected.
+    const cap = state.data.limit && state.data.limit.bytes;
+    const used = registries().reduce((s, r) => s + r.disk_bytes, 0);
+    const limit = cap ? `
+        <div class="meter limit${used > cap ? ' over' : ''}" role="img" aria-label="${Math.round((used / cap) * 100)}% of the cache size limit is used"><i style="width:${Math.min(100, (used / cap) * 100)}%"></i></div>
+        <p>${fmtBytes(used)} of the ${fmtBytes(cap)} cache limit. The least recently pulled images are removed first.</p>` : '';
     el.innerHTML = `
       <div>
         <div class="figure"><span class="big">${p.v}</span><span class="unit">${p.u}</span></div>
         <p class="lede">${lede}</p>
       </div>
-      ${d ? `<div class="volume">
-        <div class="meter" role="img" aria-label="${pct.toFixed(0)}% of the cache volume is used"><i style="width:${pct}%"></i></div>
-        <p>${fmtBytes(d.free)} free of ${fmtBytes(d.total)} on the cache volume.</p>
+      ${(d || limit) ? `<div class="volume">${limit}${d ? `
+        <div class="meter disk" role="img" aria-label="${pct.toFixed(0)}% of the cache volume is used"><i style="width:${pct}%"></i></div>
+        <p>${fmtBytes(d.free)} free of ${fmtBytes(d.total)} on the cache volume.</p>` : ''}
       </div>` : ''}`;
   }
 
@@ -382,12 +388,22 @@
     el.innerHTML = `<table><thead><tr>${th('name', 'Image')}${th('tags', 'Tags', 'num')}<th class="hide-sm">Platforms</th>${th('size', 'Size', 'num')}${th('updated', 'Cached', 'num')}<th class="act"></th></tr></thead><tbody>${body}</tbody></table>`;
   }
 
+  function cleanupNote(d) {
+    const lc = d.limit && d.limit.last_cleanup;
+    if (!lc) return '';
+    const did = lc.images ? `removed ${plural(lc.images, 'image')} and freed ${fmtBytes(lc.freed_bytes)}` : 'nothing removed';
+    const still = lc.blocked === 'recent' ? ', but the cache is still over its limit because everything left was pulled in the last five minutes'
+      : lc.blocked === 'nothing_left' ? ', but the cache is still over its limit and nothing more can be removed' : '';
+    return `Last clean-up ${ago(lc.at)}: ${did}${still}. `;
+  }
+
   function renderFoot() {
     const el = $('#foot');
     if (!state.data || !state.data.scanned_at) { el.textContent = ''; return; }
     const d = state.data;
     el.innerHTML = `Scanned ${ago(d.scanned_at)} in ${d.scan_seconds} s${d.scanning ? ' (rescanning now)' : ''}. `
       + 'Sizes are the compressed bytes stored on disk; layers shared between images are counted once per image and once on disk. '
+      + cleanupNote(d)
       + (d.ca_available ? '<a href="/ca.crt">Download the root certificate</a>.' : '');
   }
 

@@ -241,23 +241,31 @@ class Tracker:
             rec = self.state["blobs"].get(regid, {}).get(digest)
             return dict(rec) if rec else None
 
-    def activity(self, regid, repo, tag, digest, cached_at, names):
-        """Initial requester and later pulls for the current copy of a tag."""
+    def tag_times_for(self, regid, repo):
+        """ip -> sorted times of every request for a tag (not a digest) in this repository."""
+        with self.lock:
+            refs = self.state["refs"].get(regid, {}).get(repo, {})
+            times = {}
+            for ref, lst in refs.items():
+                if not DIGEST_RE.match(ref):
+                    for t, ip in lst:
+                        times.setdefault(ip, []).append(t)
+        for lst in times.values():
+            lst.sort()
+        return times
+
+    def _events(self, regid, repo, tag, digest, tag_times=None):
+        """Requests that count as pulls of this tag, oldest first, one per pull, plus client software."""
+        if tag_times is None:
+            tag_times = self.tag_times_for(regid, repo)
         with self.lock:
             refs = self.state["refs"].get(regid, {}).get(repo, {})
             own = list(refs.get(tag, []))
             by_digest = list(refs.get(digest, []))
-            # When a client pulls tag X, it follows up with a request for X's digest. That follow-up belongs
-            # to X's pull, not to every other tag that happens to share the digest.
-            tag_times = {}
-            for ref, lst in refs.items():
-                if not DIGEST_RE.match(ref):
-                    for t, ip in lst:
-                        tag_times.setdefault(ip, []).append(t)
             uas = dict(self.state["uas"])
-        for times in tag_times.values():
-            times.sort()
 
+        # When a client pulls tag X, it follows up with a request for X's digest. That follow-up belongs
+        # to X's pull, not to every other tag that happens to share the digest.
         def follows_a_tag_pull(t, ip):
             times = tag_times.get(ip, ())
             i = bisect.bisect_left(times, t - self.COALESCE)
@@ -265,15 +273,30 @@ class Tracker:
 
         # A pull by digest alone (a pinned Kubernetes image, say) is not preceded by any tag request.
         evs = own + [e for e in by_digest if not follows_a_tag_pull(e[0], e[1])]
-        empty = {"initial": None, "later": [], "later_total": 0}
-        if not evs:
-            return empty
         evs.sort(key=lambda e: e[0])
         merged = []
         for t, ip in evs:                       # a tag request and the digest request that follows it are one pull
             if merged and merged[-1][1] == ip and t - merged[-1][0] <= self.COALESCE:
                 continue
             merged.append([t, ip])
+        return merged, uas
+
+    def last_pull(self, regid, repo, tag, digest, cached_at, tag_times=None):
+        """When a tag was last pulled; when it was cached if nothing has been recorded since."""
+        merged, _ = self._events(regid, repo, tag, digest, tag_times)
+        return max([cached_at] + [e[0] for e in merged])
+
+    def last_digest_pull(self, regid, repo, digest):
+        with self.lock:
+            evs = self.state["refs"].get(regid, {}).get(repo, {}).get(digest, [])
+            return max((e[0] for e in evs), default=0.0)
+
+    def activity(self, regid, repo, tag, digest, cached_at, names):
+        """Initial requester and later pulls for the current copy of a tag."""
+        merged, uas = self._events(regid, repo, tag, digest)
+        empty = {"initial": None, "later": [], "later_total": 0}
+        if not merged:
+            return empty
         # Only requests since the current copy was stored belong to it (older ones saw a previous copy).
         gen = [e for e in merged if e[0] >= cached_at - self.SLACK]
         if not gen:
@@ -296,7 +319,7 @@ class Tracker:
                 "later": sorted(hosts.values(), key=lambda h: h["last"], reverse=True),
                 "later_total": len(later)}
 
-    def forget(self, regid=None, repo=None, tags=None, digests=None, blobs=None):
+    def forget(self, regid=None, repo=None, tags=None, digests=None, blobs=None, save=True):
         with self.lock:
             if regid is None:
                 self.state["refs"], self.state["blobs"] = {}, {}
@@ -314,7 +337,8 @@ class Tracker:
                 for d in blobs or ():
                     recs.pop(d, None)
             self.dirty = True
-        self.save(force=True)
+        if save:
+            self.save(force=True)
 
 
 TRACKER = None
@@ -490,6 +514,21 @@ class Store:
                 m, b = self.closure(d, memo)
                 protected |= m | b
         return protected
+
+    def untagged_roots(self, repo, memo):
+        """Manifests in a repository that no tag leads to and no other such manifest contains.
+
+        These are images that were only ever pulled by digest (image@sha256:...). The platform manifests of
+        a tagged index are not roots: the tag already covers them.
+        """
+        reachable = set()
+        for _, d, _ in self.tags(repo):
+            reachable |= self.closure(d, memo)[0]
+        loose = [d for d in self.revision_digests(repo) if d not in reachable]
+        inner = set()
+        for d in loose:
+            inner |= self.closure(d, memo)[0] - {d}
+        return [d for d in loose if d not in inner]
 
     def prune_repo(self, repo):
         """Remove the registry bookkeeping of a repository that has nothing left in it."""
@@ -694,7 +733,29 @@ def _store_for(regid):
     return Store(os.path.join(DATA_DIR, regid, "docker", "registry", "v2"))
 
 
-def delete_image(store, repo, tags=None):
+def _sweep(store, candidates, memo):
+    """Delete the candidate blobs that nothing in the registry references any more."""
+    protected = store.protected_digests(memo)
+    removed = freed = 0
+    gone = set()
+    for d in candidates - protected:
+        existed, size = store.remove_blob(d)
+        if existed:
+            removed += 1
+            freed += size
+        gone.add(d)
+    return removed, freed, gone
+
+
+def _drop_links(rp, manifests, blobs):
+    """Remove a repository's revision and layer links for these digests."""
+    for d in manifests:
+        shutil.rmtree(os.path.join(rp, "_manifests", "revisions", "sha256", d[7:]), ignore_errors=True)
+    for d in blobs:
+        shutil.rmtree(os.path.join(rp, "_layers", "sha256", d[7:]), ignore_errors=True)
+
+
+def delete_image(store, repo, tags=None, memo=None):
     """Remove tags (or, with tags=None, the whole repository) and free every blob nothing else uses."""
     rp = store.repo_path(repo)
     current = {n: d for n, d, _ in store.tags(repo)}
@@ -705,7 +766,7 @@ def delete_image(store, repo, tags=None):
         if absent:
             raise NotFound(f"tag {absent[0]!r} is not in the cache")
     targets = list(current) if tags is None else list(tags)
-    memo = {}
+    memo = {} if memo is None else memo
     cand_m, cand_b = set(), set()
     for t in targets:
         m, b = store.closure(current[t], memo)
@@ -723,31 +784,42 @@ def delete_image(store, repo, tags=None):
         for sub in ("_manifests", "_layers", "_uploads"):
             shutil.rmtree(os.path.join(rp, sub), ignore_errors=True)
     else:
+        # Work out what stays BEFORE removing the tags: afterwards the deleted image would itself look untagged.
+        keep_m, keep_b = set(), set()
+        remaining = [d for name, d in current.items() if name not in targets]
+        remaining += store.untagged_roots(repo, memo)
+        for d in remaining:
+            m, b = store.closure(d, memo)
+            keep_m |= m
+            keep_b |= b
         for t in targets:
             shutil.rmtree(os.path.join(rp, "_manifests", "tags", t), ignore_errors=True)
-        keep_m, keep_b = set(), set()
-        for name, d in current.items():
-            if name not in targets:
-                m, b = store.closure(d, memo)
-                keep_m |= m
-                keep_b |= b
-        for d in cand_m - keep_m:
-            shutil.rmtree(os.path.join(rp, "_manifests", "revisions", "sha256", d[7:]), ignore_errors=True)
-        for d in cand_b - keep_b:
-            shutil.rmtree(os.path.join(rp, "_layers", "sha256", d[7:]), ignore_errors=True)
+        _drop_links(rp, cand_m - keep_m, cand_b - keep_b)
 
-    protected = store.protected_digests(memo)
-    removed = freed = 0
-    gone = set()
-    for d in (cand_m | cand_b) - protected:
-        existed, size = store.remove_blob(d)
-        if existed:
-            removed += 1
-            freed += size
-        gone.add(d)
+    removed, freed, gone = _sweep(store, cand_m | cand_b, memo)
     store.prune_repo(repo)
     return {"tags": len(targets), "blobs": removed, "freed_bytes": freed, "digests": gone,
             "tag_names": targets}
+
+
+def delete_untagged(store, repo, digest, memo=None):
+    """Remove an image that was only ever pulled by digest, and free every blob nothing else uses."""
+    rp = store.repo_path(repo)
+    memo = {} if memo is None else memo
+    roots = store.untagged_roots(repo, memo)
+    if digest not in roots:
+        raise NotFound(f"{digest} is not an untagged image in {repo!r}")
+    m, b = store.closure(digest, memo)
+    cand_m, cand_b = set(m), set(b)
+    keep_m, keep_b = set(), set()
+    for d in [t for _, t, _ in store.tags(repo)] + [r for r in roots if r != digest]:
+        km, kb = store.closure(d, memo)
+        keep_m |= km
+        keep_b |= kb
+    _drop_links(rp, cand_m - keep_m, cand_b - keep_b)
+    removed, freed, gone = _sweep(store, cand_m | cand_b, memo)
+    store.prune_repo(repo)
+    return {"tags": 0, "blobs": removed, "freed_bytes": freed, "digests": gone, "tag_names": []}
 
 
 def wipe_registry(regid):
@@ -803,6 +875,150 @@ def run_delete(req):
                     "blobs": res["blobs"], "freed_bytes": res["freed_bytes"]}
 
 
+# --------------------------------------------------------------------------- size limit
+SIZE_RE = re.compile(r"^\s*([0-9]*\.?[0-9]+)\s*(?:([kmgtp])(i?))?b?\s*$", re.I)
+EVICT_TO = 0.9            # once over the limit, remove images until the cache is down to 90% of it
+PROTECT_SECONDS = 300     # never remove anything pulled in the last five minutes
+CHECK_SECONDS = max(1, int(os.environ.get("CACHE_CHECK_SECONDS", "60")))
+
+
+def parse_size(text):
+    """'50GB' -> 50 * 10**9, '20GiB' -> 20 * 2**30, '' or '0' -> 0 (no limit)."""
+    text = (text or "").strip()
+    if not text:
+        return 0
+    match = SIZE_RE.match(text)
+    if not match:
+        raise ValueError(f"{text!r} is not a size; use something like 50GB, 500MB or 1.5TB")
+    number, unit, binary = float(match.group(1)), (match.group(2) or "").lower(), bool(match.group(3))
+    power = " kmgtp".index(unit) if unit else 0
+    return int(number * (1024 if binary else 1000) ** power)
+
+
+def _limit_from_env():
+    try:
+        return parse_size(os.environ.get("CACHE_MAX_SIZE", ""))
+    except ValueError as exc:
+        print(f"CACHE_MAX_SIZE ignored: {exc}", flush=True)
+        return 0
+
+
+MAX_BYTES = _limit_from_env()
+_last_cleanup = None      # what the most recent clean-up did, for the UI
+
+
+def _stores():
+    return [(r["id"], Store(os.path.join(DATA_DIR, r["id"], "docker", "registry", "v2")))
+            for r in parse_registries()]
+
+
+def cache_bytes():
+    return sum(store.total_blob_bytes()[0] for _, store in _stores())
+
+
+def eviction_units(memo):
+    """Everything that can be removed on its own, each with the time it was last pulled."""
+    units = []
+    for regid, store in _stores():
+        for repo in store.repositories():
+            times = TRACKER.tag_times_for(regid, repo) if TRACKER else {}
+            # Tags that point at the same image are one unit: removing one frees nothing while another holds the
+            # layers, and the image is in use if any of its tags is.
+            images = {}
+            for tag, digest, cached_at in store.tags(repo):
+                last = TRACKER.last_pull(regid, repo, tag, digest, cached_at, times) if TRACKER else cached_at
+                group = images.setdefault(digest, {"tags": [], "last": 0.0})
+                group["tags"].append(tag)
+                group["last"] = max(group["last"], last)
+            for group in images.values():
+                units.append({"registry": regid, "repo": repo, "kind": "tag", "refs": sorted(group["tags"]),
+                              "last": group["last"]})
+            for digest in store.untagged_roots(repo, memo):
+                link = os.path.join(store.repo_root, repo, "_manifests", "revisions", "sha256", digest[7:], "link")
+                try:
+                    cached_at = os.stat(link).st_mtime
+                except OSError:
+                    cached_at = 0.0
+                last = max(cached_at, TRACKER.last_digest_pull(regid, repo, digest) if TRACKER else 0.0)
+                units.append({"registry": regid, "repo": repo, "kind": "revision", "refs": [digest], "last": last})
+    return units
+
+
+def evict_unit(unit, memo):
+    with _delete_lock:
+        store = _store_for(unit["registry"])
+        if unit["kind"] == "tag":
+            res = delete_image(store, unit["repo"], unit["refs"], memo=memo)
+        else:
+            res = delete_untagged(store, unit["repo"], unit["refs"][0], memo=memo)
+        if TRACKER:
+            TRACKER.forget(unit["registry"], unit["repo"], res["tag_names"], res["digests"], res["digests"], save=False)
+    return res
+
+
+def enforce_size_limit(now=None):
+    """If the cache is over its limit, remove the least recently pulled images until it is under 90% of it."""
+    global _last_cleanup
+    if not MAX_BYTES:
+        return None
+    now = time.time() if now is None else now
+    total = cache_bytes()
+    if total <= MAX_BYTES:
+        return None
+    target = int(MAX_BYTES * EVICT_TO)
+    print(f"[cache limit] {fmt_bytes(total)} is over the {fmt_bytes(MAX_BYTES)} limit; "
+          f"removing the least recently pulled images down to {fmt_bytes(target)}", flush=True)
+    memo = {}
+    units = sorted(eviction_units(memo), key=lambda u: u["last"])
+    removed = freed = 0
+    blocked = None
+    for unit in units:
+        if total <= target:
+            break
+        if now - unit["last"] < PROTECT_SECONDS:      # oldest first, so everything after this is newer still
+            blocked = "recent"
+            break
+        try:
+            res = evict_unit(unit, memo)
+        except (NotFound, ValueError, OSError) as exc:
+            print(f"[cache limit] could not remove {unit['repo']}: {exc}", flush=True)
+            continue
+        total -= res["freed_bytes"]
+        freed += res["freed_bytes"]
+        removed += 1
+        label = f"{unit['repo']}:{','.join(unit['refs'])}" if unit["kind"] == "tag" else f"{unit['repo']}@{unit['refs'][0][:19]}"
+        age = "never pulled since it was cached" if unit["last"] <= 0 else f"last pulled {time.strftime('%Y-%m-%d %H:%M', time.localtime(unit['last']))}"
+        print(f"[cache limit] removed {label} ({age}), freed {fmt_bytes(res['freed_bytes'])}", flush=True)
+    if TRACKER:
+        TRACKER.save(force=True)
+    if total > target and blocked is None:
+        blocked = "nothing_left"
+    if blocked:
+        why = ("everything left was pulled in the last five minutes" if blocked == "recent"
+               else "there is nothing more that can be removed")
+        print(f"[cache limit] still {fmt_bytes(total)}: {why}", flush=True)
+    _last_cleanup = {"at": time.time(), "images": removed, "freed_bytes": freed, "blocked": blocked}
+    start_scan(force=True)
+    return _last_cleanup
+
+
+def fmt_bytes(n):
+    for unit in ("B", "kB", "MB", "GB", "TB"):
+        if n < 1000 or unit == "TB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1000
+
+
+def janitor_loop():
+    time.sleep(min(5, CHECK_SECONDS))
+    while True:
+        try:
+            enforce_size_limit()
+        except Exception as exc:  # never let the clean-up take the UI down
+            print(f"[cache limit] {type(exc).__name__}: {exc}", flush=True)
+        time.sleep(CHECK_SECONDS)
+
+
 # --------------------------------------------------------------------------- scan state
 _lock = threading.Lock()
 _state = {"data": None, "at": 0.0, "thread": None, "error": None}
@@ -856,6 +1072,7 @@ def snapshot(wait_for=None):
         ca_available=os.path.isfile(os.path.join(PUBLIC_CERT_DIR, "ca.crt")),
         capabilities={"delete": ALLOW_DELETE, "token": bool(ADMIN_TOKEN)},
         tracking={"enabled": bool(TRACKER and TRACKER.enabled), "since": TRACKER.since if TRACKER else None},
+        limit={"bytes": MAX_BYTES, "evict_to": int(MAX_BYTES * EVICT_TO), "last_cleanup": _last_cleanup},
     )
     return base
 
@@ -978,9 +1195,12 @@ def main():
     except Exception as exc:
         print(f"tracker: {type(exc).__name__}: {exc}", flush=True)
     threading.Thread(target=tracker_loop, daemon=True).start()
+    if MAX_BYTES:
+        threading.Thread(target=janitor_loop, daemon=True).start()
     start_scan(force=True)
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
-    print(f"registry-cache UI listening on :{PORT}, data={DATA_DIR}, "
+    limit = f", size limit {fmt_bytes(MAX_BYTES)}" if MAX_BYTES else ""
+    print(f"registry-cache UI listening on :{PORT}, data={DATA_DIR}{limit}, "
           f"delete={'on' if ALLOW_DELETE else 'off'}{' (token required)' if ADMIN_TOKEN else ''}", flush=True)
     server.serve_forever()
 

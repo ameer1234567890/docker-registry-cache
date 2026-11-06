@@ -293,6 +293,28 @@ A registry in proxy mode refuses delete requests over its API, so the UI removes
 
 **Permissions.** The registries and the UI run as an unprivileged `cache` user. On first start the container gives that user ownership of `./data` (once, recursively, so upgrading from an older version with root-owned data may take a moment on a large cache). On the host that folder then shows as owned by uid 10001. The root-only certificate key stays unreadable to them.
 
+### Limiting the cache size
+
+Without a limit the cache only shrinks through `CACHE_TTL`, so a busy cache can fill the disk. Set an upper size in `.env`:
+
+```
+CACHE_MAX_SIZE=50GB
+```
+
+It accepts `500MB`, `50GB`, `1.5TB` (powers of 1000, like the sizes in the UI) or `20GiB` (powers of 1024). Empty or `0` means no limit, which is the default. A value that is not a size stops the container with a message instead of being ignored. The UI then shows how much of the limit is used.
+
+How it works:
+
+- **Once a minute** the cache's size is checked. If it is over the limit, images are removed **least recently pulled first**, until the cache is down to **90% of the limit**. The margin stops it from removing a little every minute once the cache is full.
+- **"Pulled"** means a client asked for the image, including the quick up-to-date check that `docker pull` makes when it already has the image. An image cached ten days ago and pulled two hours ago outranks one cached five days ago and never pulled since. Images with no recorded pull are ranked by when they were cached.
+- **Tags on the same image count together** (`latest` and `3.20` pointing at one image): the image is in use if any of its tags is, and it goes as one.
+- **Digest-only images** (`image@sha256:...`), which have no tag in the list, are removed the same way, so a pinned Kubernetes image cannot silently break the limit.
+- **Shared layers** are kept while another cached image uses them, so removing an image frees only what is exclusively its own, and the clean-up keeps going until the size is really down.
+- **Nothing pulled in the last five minutes is ever removed.** If that leaves the cache over the limit, it stays over until those images age, and the UI says so.
+- Every removal is written to the container log (`[cache limit] removed library/nginx:1.27 ...`), and the footer of the UI shows the last clean-up.
+
+Good to know: the size is checked every minute, so a very large pull can briefly take the cache past the limit. The size counts layer data in the cache folder, not free space on the disk, so leave headroom on the volume. `CACHE_MAX_SIZE` works independently of `UI_ALLOW_DELETE`: that setting only controls the buttons, while the limit is a server-side policy. Anything evicted is fetched from upstream again on its next pull, which counts against upstream rate limits.
+
 ## Configuration
 
 Set in `.env` (see `.env.example`).
@@ -308,6 +330,7 @@ Set in `.env` (see `.env.example`).
 | `UPSTREAM_CA_DIR`              | `./certs/upstream` | Extra roots to trust when talking to upstream registries                 |
 | `CACHE_DATA_DIR`               | `./data`           | Cached blobs, one sub-folder per registry                                |
 | `CACHE_TTL`                    | `720h`             | Evict items this long after they were fetched (`0` = never)              |
+| `CACHE_MAX_SIZE`               | _(empty)_          | Upper size limit, e.g. `50GB`; least recently pulled images go first     |
 | `LOG_LEVEL`                    | `error`            | Log level of the registries (see below)                                  |
 | `UI_ALLOW_DELETE`              | `true`             | `false` switches deleting from the UI off completely                     |
 | `UI_ADMIN_TOKEN`               | _(empty)_          | If set, required to delete from the UI                                   |

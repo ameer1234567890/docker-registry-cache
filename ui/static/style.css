@@ -291,3 +291,10 @@ th.act, td.act { width: 1%; white-space: nowrap; text-align: right; padding-left
 @media (max-width: 880px) { .btn.danger-outline { margin-left: 0; } .plat { max-width: none; } }
 .table-wrap-inner { overflow-x: auto; }
 .tags td.num, .tags th.num { white-space: nowrap; }
+
+/* size limit meter, above the disk meter */
+.volume .meter.limit i { background: var(--c2); }
+.volume .meter.limit.over i { background: var(--danger); }
+.volume .meter.disk { margin-top: 14px; }
+.volume .meter.disk i { background: var(--muted); }
+.volume .meter.limit + p { margin-top: 8px; }

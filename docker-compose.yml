@@ -42,6 +42,9 @@ services:
         k8s|Kubernetes registry|https://registry.k8s.io
         mcr|Microsoft Container Registry|https://mcr.microsoft.com
       CACHE_TTL: ${CACHE_TTL:-720h}
+      # Upper limit for the whole cache, e.g. 50GB. Over it, the least recently pulled images are removed first.
+      # Empty means no limit.
+      CACHE_MAX_SIZE: ${CACHE_MAX_SIZE:-}
       # error hides two harmless start-up warnings that registry:2 prints in cache mode. Use warn to see them.
       LOG_LEVEL: ${LOG_LEVEL:-error}
       # Only used when no server certificate is provided (see README).

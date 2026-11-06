@@ -28,6 +28,10 @@ log() { echo "[entrypoint] $*"; }
 trim() { printf '%s' "$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'; }
 yq()   { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"; }   # YAML single-quoted string
 
+# CACHE_MAX_SIZE: empty or 0 means no limit; otherwise a size such as 50GB, 500MB, 1.5TB or 20GiB.
+if ! printf '%s\n' "${CACHE_MAX_SIZE:-}" | grep -Eiq '^[[:space:]]*(([0-9]*\.?[0-9]+[[:space:]]*(([kmgtp]i?)?b?)?)?)[[:space:]]*$'; then
+  die "CACHE_MAX_SIZE='${CACHE_MAX_SIZE}' is not a size. Use something like 50GB, 500MB or 1.5TB, or leave it empty for no limit."
+fi
 mkdir -p "$RUN_DIR" "$(dirname "$NGINX_CONF")" "$DATA"
 rm -f "$RUN_DIR"/*.yml
 
