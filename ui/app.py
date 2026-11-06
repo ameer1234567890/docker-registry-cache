@@ -105,14 +105,18 @@ class Tracker:
     MAX_EVENTS = 2000
     MAX_BLOB_RECORDS = 100000
 
-    def __init__(self, state_dir, log_path, host_to_id):
+    WRITE_WINDOW = 30    # a blob written within 30 s of a request ending was fetched by that request
+    KEEP_DAYS = 90       # days of per-day statistics kept (lifetime totals are kept forever)
+
+    def __init__(self, state_dir, log_path, host_to_id, blob_mtime=None):
         self.dir, self.log_path, self.host_to_id = state_dir, log_path, host_to_id
+        self.blob_mtime = blob_mtime          # callable(registry id, digest) -> file mtime or None
         self.path = os.path.join(state_dir, "tracking.json")
         self.lock = threading.Lock()
         self.dirty = False
         self.last_save = 0.0
         self.state = {"v": 1, "since": time.time(), "offset": 0, "inode": 0,
-                      "refs": {}, "blobs": {}, "uas": {}}
+                      "refs": {}, "blobs": {}, "uas": {}, "stats": {"days": {}, "totals": {}}}
         try:
             with open(self.path, "r", encoding="utf-8") as fh:
                 loaded = json.load(fh)
@@ -120,6 +124,7 @@ class Tracker:
                 self.state.update(loaded)
         except (OSError, ValueError):
             pass
+        self.state.setdefault("stats", {"days": {}, "totals": {}})      # state files from before statistics existed
 
     @property
     def enabled(self):
@@ -189,8 +194,11 @@ class Tracker:
                 self._fail(regid, ref, status, t, ip)
         elif is_digest and method == "GET":
             if status in (200, 206):
-                self._ok(regid, ref, t)
+                took = float(o.get("rt") or 0)
+                self._count(regid, t, self._was_cached(regid, ref, t, took), int(o.get("b") or 0))
+                self._ok(regid, ref, t)           # after classifying: a first success must not make itself a hit
             elif status >= 400:
+                self._count_failure(regid, t)
                 self._fail(regid, ref, status, t, ip)
 
     def _event(self, regid, repo, ref, t, ip):
@@ -209,13 +217,58 @@ class Tracker:
 
     def _ok(self, regid, digest, t):
         rec = self._blob_rec(regid, digest)
-        rec["ok"] = min(rec.get("ok", t), round(t))
+        rec["ok"] = min(rec.get("ok", t), round(t, 1))
         fail = rec.get("fail")
         if fail and t >= fail[1]:
             rec.pop("fail")
 
     def _fail(self, regid, digest, status, t, ip):
         self._blob_rec(regid, digest)["fail"] = [status, round(t), ip]
+
+    # ---- hit / miss statistics
+    def _was_cached(self, regid, digest, t, took):
+        """Was this layer already in the cache when the client asked for it?
+
+        The registry never says, so it is inferred. The log time is when the request ended, so it began
+        at t - took. A blob file older than that existed beforehand: a hit. One written while the request
+        ran was fetched from upstream by it: a miss. When the file cannot settle it (replayed log, blob
+        since evicted or fetched again later), fall back to whether this layer was served before.
+        """
+        start = t - max(took, 0.0)
+        mtime = self.blob_mtime(regid, digest) if self.blob_mtime else None
+        if mtime is not None:
+            if mtime < start - 1.0:               # a second of slack for coarse file timestamps: err towards "miss"
+                return True
+            if mtime <= t + self.WRITE_WINDOW:
+                return False
+        rec = self.state["blobs"].get(regid, {}).get(digest)
+        first = rec.get("ok") if rec else None
+        return first is not None and first < start
+
+    def _add_stat(self, regid, t, deltas):
+        stats = self.state["stats"]
+        day = time.strftime("%Y-%m-%d", time.gmtime(t))
+        days = stats["days"].setdefault(regid, {})
+        if day not in days and len(days) >= self.KEEP_DAYS:
+            for old in sorted(days)[:len(days) - self.KEEP_DAYS + 1]:
+                del days[old]
+        for arr in (days.setdefault(day, [0, 0, 0, 0, 0]), stats["totals"].setdefault(regid, [0, 0, 0, 0, 0])):
+            for i, d in deltas:
+                arr[i] += d
+
+    def _count(self, regid, t, hit, nbytes):
+        """[hits, misses, bytes served from cache, bytes fetched from upstream, failed requests]"""
+        self._add_stat(regid, t, [(0, 1), (2, nbytes)] if hit else [(1, 1), (3, nbytes)])
+
+    def _count_failure(self, regid, t):
+        self._add_stat(regid, t, [(4, 1)])
+
+    def stats_snapshot(self):
+        with self.lock:
+            stats = self.state["stats"]
+            return {"days": {r: {d: list(v) for d, v in days.items()} for r, days in stats["days"].items()},
+                    "totals": {r: list(v) for r, v in stats["totals"].items()},
+                    "since": self.state.get("since")}
 
     # ---- persistence
     def save(self, force=False):
@@ -342,6 +395,18 @@ class Tracker:
 
 
 TRACKER = None
+
+
+def blob_mtime(regid, digest):
+    """When a cached blob's file was last written, or None if it is not on disk."""
+    hexd = (digest or "").partition(":")[2]
+    if not HEX64.match(hexd):
+        return None
+    try:
+        return os.stat(os.path.join(DATA_DIR, regid, "docker", "registry", "v2", "blobs", "sha256",
+                                    hexd[:2], hexd, "data")).st_mtime
+    except OSError:
+        return None
 
 
 # --------------------------------------------------------------------------- storage
@@ -1073,6 +1138,7 @@ def snapshot(wait_for=None):
         capabilities={"delete": ALLOW_DELETE, "token": bool(ADMIN_TOKEN)},
         tracking={"enabled": bool(TRACKER and TRACKER.enabled), "since": TRACKER.since if TRACKER else None},
         limit={"bytes": MAX_BYTES, "evict_to": int(MAX_BYTES * EVICT_TO), "last_cleanup": _last_cleanup},
+        stats=TRACKER.stats_snapshot() if TRACKER else None,
     )
     return base
 
@@ -1189,7 +1255,7 @@ def main():
         os.makedirs(STATE_DIR, exist_ok=True)
     except OSError:
         pass
-    TRACKER = Tracker(STATE_DIR, ACCESS_LOG, host_to_id)
+    TRACKER = Tracker(STATE_DIR, ACCESS_LOG, host_to_id, blob_mtime=blob_mtime)
     try:
         TRACKER.poll()          # catch up on the log first, so the first scan knows why things are missing
     except Exception as exc:

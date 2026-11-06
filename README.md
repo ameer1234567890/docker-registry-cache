@@ -230,6 +230,7 @@ Remove the DNS records or hosts line, and the certificate from the trust store (
 
 - Total cache size, free space on the volume, and a scale drawing of the largest images.
 - A list of registries with size and share of the cache, and a searchable, sortable table of images. Expand an image for its tags, platforms, sizes, build date, digest, and the `docker pull` command to copy.
+- **How well it works:** bandwidth saved, hit rate and a daily chart, for the whole cache or one registry ([details below](#cache-performance)).
 - **Who pulled it:** for every tag, which host requested it first and which hosts pulled it afterwards ([details below](#who-pulled-what)).
 - **Why something is missing:** when a platform or layer is not cached, the reason is shown next to it ([details below](#why-some-layers-are-not-cached)).
 - **Deleting:** remove one tag, a whole image, everything from one registry, or the entire cache, each behind a warning dialog ([details below](#deleting-from-the-cache)).
@@ -250,6 +251,24 @@ How it works: nginx writes one JSON line per registry request to `data/.registry
 - **A pull counts once**, even though a client sends several requests for it (a check for the tag, then a request for its digest).
 - **Re-cached images start over.** If an image expires and is fetched again, or its tag moves to new content, only requests since then belong to the new copy.
 - **Images cached before tracking started** show "Not recorded" as the first puller. Their later pulls are listed from the moment tracking began.
+
+### Cache performance
+
+The **Cache performance** panel shows what the cache is worth, for the last 7 days, the last 30 days, or all time. Select a registry in the list to see only its numbers.
+
+- **Bandwidth saved** is the data served from the cache that clients would otherwise have downloaded from the upstream registry again.
+- **Hit rate** is shown by data and by number of layers. **Served from the cache** and **Fetched from upstream** are the two halves of the data. The daily chart stacks them.
+- **Failed requests** counts layer downloads that failed, such as upstream rate limits. The image's own details say which layer and why.
+
+What counts: layer downloads (layers and image configs). Manifests are a few kilobytes and are checked against upstream on every tag pull anyway, so they are left out.
+
+**How a hit is recognised.** The registry does not say whether it served a layer from disk or fetched it, so the UI works it out. nginx logs how long each request took, which gives the moment it began. A layer whose file on disk is older than that existed beforehand, so it was a **hit**. A file written while the request ran was fetched from upstream by it, so it was a **miss**. When the file cannot settle it (a replayed log, a layer since evicted), the UI falls back to whether that layer had been served successfully before. Treat the result as a close estimate: it deliberately leans towards counting misses, so savings are understated rather than flattered.
+
+- Two clients that start downloading an uncached layer at the same moment both count as misses, because both really did fetch it from upstream.
+- A layer that expired and was fetched again counts as a miss.
+- Layers cached before tracking started count as hits from their first request after it did.
+- Days are UTC. Per-day numbers are kept for 90 days and lifetime totals are kept indefinitely, in `data/.registry-cache/tracking.json`. They survive restarts and deleting images, because they describe traffic rather than what is stored. To start from zero, stop the container and delete that file (which also clears the pull history).
+- The panel appears only when the request log exists, so it is hidden if the UI runs outside the container.
 
 ### Why some layers are not cached
 

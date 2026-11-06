@@ -58,7 +58,7 @@ chunked_transfer_encoding on;
 CONF
 # Registry requests as JSON lines for the UI: who pulled which manifest, and which blob fetches failed.
 cat >> "$NGINX_CONF" <<'CONF'
-log_format registry_json escape=json '{"t":$msec,"ip":"$remote_addr","h":"$host","m":"$request_method","u":"$request_uri","s":$status,"b":$body_bytes_sent,"ua":"$http_user_agent"}';
+log_format registry_json escape=json '{"t":$msec,"ip":"$remote_addr","h":"$host","m":"$request_method","u":"$request_uri","s":$status,"b":$body_bytes_sent,"rt":$request_time,"ua":"$http_user_agent"}';
 map $request_uri $log_registry_request { default 0; ~^/v2/.+/(manifests|blobs)/ 1; }
 CONF
 echo "access_log ${ACCESS_LOG} registry_json if=\$log_registry_request;" >> "$NGINX_CONF"

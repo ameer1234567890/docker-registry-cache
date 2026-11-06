@@ -3,6 +3,7 @@
 
   const THEME_KEY = 'registry-cache-theme';
   const TOKEN_KEY = 'registry-cache-token';
+  const RANGE_KEY = 'registry-cache-range';
   const POLL_MS = 30000;
   const MAX_SEGMENTS = 16;
 
@@ -18,6 +19,11 @@
     sort: { key: 'size', dir: 'desc' },
     open: new Set(),
   };
+
+  const RANGES = { '7d': { label: '7 days', days: 7 }, '30d': { label: '30 days', days: 30 }, all: { label: 'All time', days: 30 } };
+  state.range = (() => {
+    try { const r = localStorage.getItem(RANGE_KEY); return RANGES[r] ? r : '7d'; } catch (e) { return '7d'; }
+  })();
 
   /* ------------------------------------------------------------- theme */
   const root = document.documentElement;
@@ -269,6 +275,84 @@
         r.disk_bytes, r.disk_bytes / total, colorOf(i))).join('');
   }
 
+  /* ---- hit and miss statistics: [hits, misses, bytes from cache, bytes from upstream, failed requests] */
+  const ZERO = () => [0, 0, 0, 0, 0];
+  const addArr = (a, b) => a.map((v, i) => v + (b[i] || 0));
+
+  function statsData() {
+    const st = state.data && state.data.stats;
+    if (!st) return null;
+    const ids = state.reg === 'all'
+      ? [...new Set([...Object.keys(st.days), ...Object.keys(st.totals)])]
+      : [state.reg];
+    const dates = [];
+    for (let i = RANGES[state.range].days - 1; i >= 0; i--) {
+      dates.push(new Date(Date.now() - i * 86400000).toISOString().slice(0, 10));
+    }
+    const perDay = dates.map((d) => ids.reduce((acc, id) => addArr(acc, (st.days[id] || {})[d] || ZERO()), ZERO()));
+    const lifetime = ids.reduce((acc, id) => addArr(acc, st.totals[id] || ZERO()), ZERO());
+    return { dates, perDay, window: state.range === 'all' ? lifetime : perDay.reduce(addArr, ZERO()), since: st.since };
+  }
+
+  const dayLabel = (iso) => new Date(`${iso}T00:00:00Z`).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+
+  function renderStats() {
+    const el = $('#stats');
+    const d = state.data && tracking().enabled ? statsData() : null;
+    if (!d) { el.hidden = true; return; }
+    el.hidden = false;
+    const [hitN, missN, hitB, missB, failN] = d.window;
+    const served = hitB + missB;
+    const requests = hitN + missN;
+    const scope = state.reg === 'all' ? '' : ` for ${esc((registries().find((r) => r.id === state.reg) || {}).name || state.reg)}`;
+    const range = Object.entries(RANGES).map(([k, r]) =>
+      `<button type="button" data-range="${k}" aria-pressed="${state.range === k}">${r.label}</button>`).join('');
+    const head = `<div class="stats-head"><h2>Cache performance${scope}</h2>
+      <div class="range" role="group" aria-label="Time range">${range}</div></div>`;
+
+    if (!requests && !failN) {
+      el.innerHTML = `${head}<p class="stats-empty">No layer downloads have been recorded${state.range === 'all' ? ' yet' : ' in this period'}.
+        Pull an image through the cache and the savings appear here.</p>`;
+      return;
+    }
+
+    const p = fmtParts(hitB);
+    const byData = served ? Math.round((hitB / served) * 100) : 0;
+    const byCount = requests ? Math.round((hitN / requests) * 100) : 0;
+    const peak = Math.max(...d.perDay.map((a) => a[2] + a[3]), 1);
+    const bars = d.perDay.map((a, i) => {
+      const tip = `${dayLabel(d.dates[i])}: ${fmtBytes(a[2])} from the cache, ${fmtBytes(a[3])} from upstream`
+        + (a[0] + a[1] ? ` (${Math.round((a[0] / (a[0] + a[1])) * 100)}% of layers from the cache)` : '');
+      return `<div class="day" title="${esc(tip)}" role="img" aria-label="${esc(tip)}">
+        <i class="b-miss" style="height:${(a[3] / peak) * 100}%"></i><i class="b-hit" style="height:${(a[2] / peak) * 100}%"></i></div>`;
+    }).join('');
+    const first = dayLabel(d.dates[0]);
+    const last = dayLabel(d.dates[d.dates.length - 1]);
+
+    el.innerHTML = `${head}
+      <div class="stats-body">
+        <div class="stats-figs">
+          <div class="figure"><span class="big sm">${p.v}</span><span class="unit">${p.u}</span></div>
+          <p class="lede">of bandwidth saved: layers served from the cache that clients would otherwise have downloaded from the upstream registry again.</p>
+          <dl class="kv">
+            <div><dt>Hit rate</dt><dd>${byData}% of data</dd><dd class="sub">${byCount}% of layers (${hitN.toLocaleString()} of ${requests.toLocaleString()})</dd></div>
+            <div><dt>Served from the cache</dt><dd>${fmtBytes(hitB)}</dd></div>
+            <div><dt>Fetched from upstream</dt><dd>${fmtBytes(missB)}</dd><dd class="sub">${plural(missN, 'layer')} that were not cached yet</dd></div>
+            ${failN ? `<div class="bad"><dt>Failed requests</dt><dd>${failN.toLocaleString()}</dd><dd class="sub">for example rate limits; see the image details</dd></div>` : ''}
+          </dl>
+        </div>
+        <div class="stats-chart">
+          <div class="legend"><span><i class="b-hit"></i>From the cache</span><span><i class="b-miss"></i>From upstream</span>
+            <span class="muted">${state.range === 'all' ? 'Daily, last 30 days' : 'Daily'}</span></div>
+          <div class="bars" style="--n:${d.dates.length}">${bars}</div>
+          <div class="axis"><span>${first}</span><span>busiest day ${fmtBytes(peak)}</span><span>${last}</span></div>
+        </div>
+      </div>
+      <p class="note">A layer counts as a hit when it was already in the cache when the client asked for it. The registry does not report this,
+      so it is worked out from the request log and file times and is a close estimate that leans towards counting misses.${d.since ? ` Counting started ${esc(absDate(d.since))}.` : ''}
+      Statistics are kept when images are deleted.</p>`;
+  }
+
   function renderBulk() {
     const btn = $('#bulk');
     const regs = inScope();
@@ -418,6 +502,7 @@
     renderBanner();
     renderHero();
     renderStrip();
+    renderStats();
     renderRail();
     renderBulk();
     renderTable();
@@ -679,7 +764,7 @@
   }
 
   document.addEventListener('click', (e) => {
-    const t = e.target.closest('[data-reg],[data-toggle],[data-sort],[data-copy],[data-seg],[data-action],[data-hosts],[data-gaps],[data-del-scope]');
+    const t = e.target.closest('[data-reg],[data-toggle],[data-sort],[data-copy],[data-seg],[data-action],[data-hosts],[data-gaps],[data-del-scope],[data-range]');
     if (!t) return;
     if (t.dataset.reg !== undefined) { state.reg = t.dataset.reg; render(); }
     else if (t.dataset.toggle !== undefined) {
@@ -694,7 +779,11 @@
       renderTable();
     } else if (t.dataset.copy) copyText(t.dataset.copy);
     else if (t.dataset.seg) reveal(t.dataset.seg);
-    else if (t.dataset.hosts) openHosts(t.dataset.hosts);
+    else if (t.dataset.range) {
+      state.range = t.dataset.range;
+      try { localStorage.setItem(RANGE_KEY, state.range); } catch (err) { /* storage blocked */ }
+      renderStats();
+    } else if (t.dataset.hosts) openHosts(t.dataset.hosts);
     else if (t.dataset.gaps) openGaps(t.dataset.gaps);
     else if (t.dataset.delScope) {
       openConfirm({ scope: t.dataset.delScope, registry: t.dataset.delReg, repo: t.dataset.delRepo || undefined, tag: t.dataset.delTag || undefined });
