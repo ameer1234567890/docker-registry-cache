@@ -11,12 +11,14 @@
 Standard library only.
 """
 import bisect
+import hashlib
 import hmac
 import json
 import mimetypes
 import os
 import re
 import shutil
+import ssl
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1084,6 +1086,46 @@ def janitor_loop():
         time.sleep(CHECK_SECONDS)
 
 
+# --------------------------------------------------------------------------- client setup script
+_HERE = os.path.dirname(os.path.abspath(__file__))
+CLIENT_SETUP_FILE = next((p for p in (os.environ.get("CLIENT_SETUP_FILE", ""),
+                                      os.path.join(_HERE, "client-setup.sh"),
+                                      os.path.join(_HERE, "..", "client", "setup.sh")) if p and os.path.isfile(p)), "")
+# A Host header ends up inside a shell script, so only plain host names, IPv4 and [IPv6] with an optional port pass.
+HOST_HEADER_RE = re.compile(r"^(?:[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:]+\])(?::[0-9]{1,5})?$")
+HOSTNAME_RE = re.compile(r"^[a-z0-9][a-z0-9.-]*$")
+
+
+def ca_fingerprint():
+    """SHA-256 fingerprint of the published root certificate, formatted like openssl does, or None."""
+    try:
+        with open(os.path.join(PUBLIC_CERT_DIR, "ca.crt"), "r", encoding="ascii", errors="ignore") as fh:
+            match = re.search(r"-----BEGIN CERTIFICATE-----.+?-----END CERTIFICATE-----", fh.read(), re.S)
+        if not match:
+            return None
+        digest = hashlib.sha256(ssl.PEM_cert_to_DER_cert(match.group(0))).digest()
+        return ":".join(f"{b:02X}" for b in digest)
+    except (OSError, ValueError):
+        return None
+
+
+def render_client_setup(host_header, proto):
+    """The client setup script with this cache's address, download URL and registry names filled in."""
+    if not CLIENT_SETUP_FILE:
+        raise NotFound("the client setup script is not part of this build")
+    if not HOST_HEADER_RE.match(host_header or ""):
+        raise ValueError("the Host header is not a plain host name or address")
+    if proto not in ("http", "https"):
+        proto = "http"
+    address = re.sub(r":[0-9]{1,5}$", "", host_header).strip("[]")
+    hosts = [r["upstream"] for r in parse_registries() if r["upstream"] and HOSTNAME_RE.match(r["upstream"])]
+    with open(CLIENT_SETUP_FILE, "r", encoding="utf-8") as fh:
+        script = fh.read()
+    return (script.replace("@@HOSTS@@", " ".join(hosts))
+                  .replace("@@ADDR@@", address)
+                  .replace("@@BASE_URL@@", f"{proto}://{host_header}"))
+
+
 # --------------------------------------------------------------------------- scan state
 _lock = threading.Lock()
 _state = {"data": None, "at": 0.0, "thread": None, "error": None}
@@ -1135,6 +1177,7 @@ def snapshot(wait_for=None):
     base.update(
         scanning=scanning, error=error, ttl=CACHE_TTL, clients=load_client_names(),
         ca_available=os.path.isfile(os.path.join(PUBLIC_CERT_DIR, "ca.crt")),
+        ca_fingerprint=ca_fingerprint(),
         capabilities={"delete": ALLOW_DELETE, "token": bool(ADMIN_TOKEN)},
         tracking={"enabled": bool(TRACKER and TRACKER.enabled), "since": TRACKER.since if TRACKER else None},
         limit={"bytes": MAX_BYTES, "evict_to": int(MAX_BYTES * EVICT_TO), "last_cleanup": _last_cleanup},
@@ -1184,6 +1227,14 @@ class Handler(BaseHTTPRequestHandler):
             # Block only for the very first scan; afterwards serve the last result at once
             # while a stale cache is rescanned in the background.
             return self._json(snapshot(thread if _state["data"] is None else None))
+        if route == "/setup.sh":
+            try:
+                script = render_client_setup(self.headers.get("Host"), self.headers.get("X-Forwarded-Proto", "http"))
+            except NotFound as exc:
+                return self._send(404, f"{exc}\n".encode(), "text/plain; charset=utf-8")
+            except ValueError as exc:
+                return self._send(400, f"{exc}\n".encode(), "text/plain; charset=utf-8")
+            return self._send(200, script.encode("utf-8"), "text/plain; charset=utf-8")
         if route == "/ca.crt":
             return self._file(os.path.join(PUBLIC_CERT_DIR, "ca.crt"), "application/x-x509-ca-cert",
                               {"Content-Disposition": 'attachment; filename="registry-cache-ca.crt"'})

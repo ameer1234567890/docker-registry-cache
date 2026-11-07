@@ -13,6 +13,7 @@ COPY container/entrypoint.sh container/tls.sh /usr/local/bin/
 COPY container/proxy-common.conf /etc/nginx/proxy-common.conf
 COPY clients.conf /etc/registry-cache/clients.conf
 COPY ui/ /app/
+COPY client/setup.sh /app/client-setup.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/tls.sh
 
 EXPOSE 443 8080

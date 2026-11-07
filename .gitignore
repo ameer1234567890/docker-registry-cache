@@ -4,3 +4,7 @@ certs/*.key
 certs/*.srl
 certs/.generated
 data/
+
+# Python bytecode
+__pycache__/
+*.pyc

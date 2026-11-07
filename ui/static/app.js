@@ -575,7 +575,8 @@
     const ip = /^[\d.]+$/.test(h) || h.includes(':') ? h : '<server-ip>';
 
     const trust = d.ca_available
-      ? `<p>Download the root certificate, then tell Docker to trust it for each registry name. Trusting it for the whole machine is covered in the README.</p>
+      ? `<p>Download the root certificate, then tell Docker to trust it for each registry name. Trusting it for the whole machine is covered in the README.
+         Its SHA-256 fingerprint is <code>${esc(d.ca_fingerprint || 'unknown')}</code>.</p>
          <p><a class="btn primary" href="/ca.crt" style="display:inline-block;text-decoration:none">Download root certificate</a></p>
          ${codeBlock(`for h in ${hosts.join(' ')}; do\n  sudo install -D -m 644 registry-cache-ca.crt /etc/docker/certs.d/$h/ca.crt\ndone`)}`
       : `<p>No root certificate is published by this server, because you supplied a server certificate without <code>ca.crt</code>.
@@ -585,15 +586,32 @@
       ? '# Docker Hub\ndocker pull alpine:3.20'
       : `# ${r.name}\ndocker pull ${r.endpoint}/owner/image:tag`)).join('\n\n');
 
+    // One command for Linux and macOS. The fingerprint pins the certificate, so a tampered download is refused.
+    const fp = d.ca_available ? d.ca_fingerprint : null;
+    const curl = location.protocol === 'https:' ? 'curl -fsSLk' : 'curl -fsSL';
+    const quick = fp
+      ? `<p>Run this on each client. It adds the registry names to <code>/etc/hosts</code>, trusts the root certificate and checks that
+         every name works. It only accepts a certificate with the fingerprint in the command, so a download that has been tampered with is refused.</p>
+         ${codeBlock(`${curl} ${location.origin}/setup.sh | sudo sh -s -- --fingerprint '${fp}'`)}`
+      : `<p>This cache publishes no root certificate, because you supplied your own server certificate. This sets up only the
+         <code>/etc/hosts</code> entries; clients must already trust whatever issued the certificate.</p>
+         ${codeBlock(`${curl} ${location.origin}/setup.sh | sudo sh -s -- --no-trust`)}`;
+
     showDialog('#dlg', 'dlg-title', 'Connect a client', `
       <p>Nothing changes in image names or commands. The registries' own hostnames are pointed at this server,
       and the cache is chosen by the name the client asks for.</p>
-      <h3>1. Point the registry names at this server</h3>
+      <h3>Quick setup for Linux and macOS</h3>
+      ${quick}
+      <p>Add <code>--dry-run</code> to see what it would change without changing anything, or <code>--remove</code> to undo it.
+      <code>--no-system-trust</code> trusts the certificate for Docker and Podman only, not the whole machine.
+      Windows is not covered by the script; use the manual steps below.</p>
+      <h3>Or do it by hand</h3>
+      <h4>1. Point the registry names at this server</h4>
       <p>On your DNS server (dnsmasq syntax shown), or in <code>/etc/hosts</code> on each client:</p>
       ${codeBlock(hosts.map((x) => `address=/${x}/${ip}`).join('\n'))}
       ${codeBlock(`${ip} ${hosts.join(' ')}`)}
-      <h3>2. Trust the certificate</h3>${trust}
-      <h3>3. Pull as usual</h3>
+      <h4>2. Trust the certificate</h4>${trust}
+      <h4>3. Pull as usual</h4>
       ${codeBlock(examples || '# No registries are configured.')}`);
   }
 

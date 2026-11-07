@@ -336,3 +336,7 @@ th.act, td.act { width: 1%; white-space: nowrap; text-align: right; padding-left
 .axis { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-top: 6px; }
 .stats .note { margin: 14px 0 0; font-size: 12px; }
 @media (max-width: 880px) { .stats-body { grid-template-columns: minmax(0, 1fr); gap: 18px; } .stats { padding: 16px; } }
+
+.dlg-body h4 { margin: 18px 0 4px; font-size: 14px; }
+.dlg-body code { font: 12.5px var(--mono); overflow-wrap: anywhere; }
+.code pre { white-space: pre-wrap; overflow-wrap: anywhere; }
