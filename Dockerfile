@@ -3,7 +3,9 @@
 ARG REGISTRY_BASE_IMAGE=registry:2
 FROM ${REGISTRY_BASE_IMAGE} AS registry
 
-FROM nginx:1.27-alpine
+# The -slim variant is the same nginx build without the optional modules (image filter, XSLT, GeoIP, njs)
+# and their libraries. Nothing here uses them, and leaving them out saves roughly 35-40 MB.
+FROM nginx:1.27-alpine-slim
 RUN apk add --no-cache openssl python3 su-exec ca-certificates \
  && rm -f /etc/nginx/conf.d/default.conf \
  && addgroup -g 10001 cache && adduser -D -H -u 10001 -G cache cache
