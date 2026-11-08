@@ -4,7 +4,7 @@
 # Clients keep using the real registry names (ghcr.io, quay.io, ...). DNS on the client side
 # points those names at this container, and nginx picks the right cache by TLS server name:
 #
-#   CACHE_REGISTRIES --> one registry:2 pull-through process per line (127.0.0.1:5001, 5002, ...)
+#   CACHE_REGISTRIES --> one registry pull-through process per line (127.0.0.1:5001, 5002, ...)
 #                   --> one nginx server block per line, server_name = the upstream's hostname
 #   plus the web UI (port 8080). Registries and UI run as the unprivileged "cache" user: it owns /data,
 #   so the UI can delete cached files, but it cannot read the root-only CA key.

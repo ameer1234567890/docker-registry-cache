@@ -37,7 +37,7 @@ docker build -t ameer1234567890/docker-registry-cache:latest .
 docker compose up -d
 ```
 
-Docker Compose only pulls an image when it is not already on the machine, so after a local build under the same name it runs your build. Run `docker compose pull` to go back to the published one. To take the cache binary from a different registry release, add `--build-arg REGISTRY_BASE_IMAGE=registry:2` to the build (that is the default).
+Docker Compose only pulls an image when it is not already on the machine, so after a local build under the same name it runs your build. Run `docker compose pull` to go back to the published one. The cache binary is taken from `registry:3` by default. To use another release, such as the older 2.x line, add `--build-arg REGISTRY_BASE_IMAGE=registry:2` to the build.
 
 ### Publishing it
 
@@ -430,12 +430,12 @@ The same rule applies: anyone who can reach the cache can read what these creden
 
 ### Registry log messages
 
-The registries log at `error` by default. At `warn` you would see two messages at every start, once per registry, that are expected in cache mode and do not mean anything is wrong:
+The registries log at `error` by default. Registry 2.8.3 printed two messages at every start, once per registry, that are expected in cache mode and do not mean anything is wrong:
 
 - `Registry does not implement RepositoryRemover. Will not be able to delete repos and tags`: the registry reports that a pull-through cache does not support deleting repositories and tags through its HTTP API. Nothing here uses that API. The web UI removes cached files itself, and expiry (`CACHE_TTL`) is handled inside the cache.
 - `No HTTP secret provided - generated random secret`: only matters for resumable uploads, which a cache never receives. The container now supplies a secret, so this one no longer appears.
 
-Set `LOG_LEVEL=warn` (or `info`) in `.env` if you want to see them or investigate a problem. Real failures, such as an upstream that is unreachable or rejects the login, are logged at `error` and always show.
+The image is now built on registry 3, which may print different start-up messages. Set `LOG_LEVEL=warn` (or `info`) in `.env` to see what yours prints, or to investigate a problem. Real failures, such as an upstream that is unreachable or rejects the login, are logged at `error` and always show.
 
 ## Maintenance
 
@@ -449,6 +449,6 @@ Set `LOG_LEVEL=warn` (or `info`) in `.env` if you want to see them or investigat
 - Registry names that are not in `CACHE_REGISTRIES` (for example `us.gcr.io`, `docker.elastic.co`) are not cached. Add a line for each one you use. Wildcard hosts need one entry per hostname.
 - Pull-through only; pushing is not possible by design.
 - One container means one failure domain: if any internal process exits, the container stops and Docker restarts all of them.
-- `registry:2` expires cached items `CACHE_TTL` after they were fetched (not after they were last used); a later pull fetches them again. Raise it, or set `0`, for a long-lived cache and watch the disk meter in the UI.
+- The registry expires cached items `CACHE_TTL` after they were fetched (not after they were last used); a later pull fetches them again. Raise it, or set `0`, for a long-lived cache and watch the disk meter in the UI.
 - The UI has no login of its own, and it can delete. Set `UI_ADMIN_TOKEN`, put it behind your own reverse proxy, or restrict `BIND_ADDR` on untrusted networks. Set `UI_ALLOW_DELETE=false` to make it read-only.
 - Pull history needs the client's real address. See the NAT note under [Who pulled what](#who-pulled-what).

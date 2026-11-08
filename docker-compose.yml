@@ -45,7 +45,7 @@ services:
       # Upper limit for the whole cache, e.g. 50GB. Over it, the least recently pulled images are removed first.
       # Empty means no limit.
       CACHE_MAX_SIZE: ${CACHE_MAX_SIZE:-}
-      # error hides two harmless start-up warnings that registry:2 prints in cache mode. Use warn to see them.
+      # error hides the harmless start-up warnings the registry prints in cache mode (2.x printed two). Use warn to see them.
       LOG_LEVEL: ${LOG_LEVEL:-error}
       # Only used when no server certificate is provided (see README).
       TLS_SANS: ${TLS_SANS:-}

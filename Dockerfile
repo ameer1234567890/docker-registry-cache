@@ -1,6 +1,6 @@
-# One image, one container: registry:2 (pull-through, one process per upstream),
+# One image, one container: the Docker registry (pull-through, one process per upstream),
 # nginx (TLS on a single port, routes by hostname) and the web UI.
-ARG REGISTRY_BASE_IMAGE=registry:2
+ARG REGISTRY_BASE_IMAGE=registry:3
 FROM ${REGISTRY_BASE_IMAGE} AS registry
 
 # The -slim variant is the same nginx build without the optional modules (image filter, XSLT, GeoIP, njs)
