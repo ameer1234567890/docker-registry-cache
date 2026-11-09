@@ -336,10 +336,11 @@ class Tracker:
             merged.append([t, ip])
         return merged, uas
 
-    def last_pull(self, regid, repo, tag, digest, cached_at, tag_times=None):
-        """When a tag was last pulled; when it was cached if nothing has been recorded since."""
+    def last_pull(self, regid, repo, tag, digest, touched, tag_times=None):
+        """When a tag was last pulled. `touched` is the tag file's modification time, which the registry updates
+        on every tag request, so it is a good record of the last pull even before tracking began."""
         merged, _ = self._events(regid, repo, tag, digest, tag_times)
-        return max([cached_at] + [e[0] for e in merged])
+        return max([touched] + [e[0] for e in merged])
 
     def last_digest_pull(self, regid, repo, digest):
         with self.lock:
@@ -362,7 +363,11 @@ class Tracker:
 
         initial = None
         later = gen
-        if gen[0][0] <= cached_at + self.SLACK:        # otherwise the first request was never logged
+        # The first request is known if tracking was already running when this content was stored (so nothing
+        # earlier can be missing), or if it is the very request that caused the store. Otherwise it predates the log.
+        since = self.state.get("since")
+        covered = (since is not None and since <= cached_at + self.SLACK) or gen[0][0] <= cached_at + self.SLACK
+        if covered:
             initial = dict(who(gen[0][1]), t=gen[0][0])
             later = gen[1:]
         hosts = {}
@@ -522,6 +527,21 @@ class Store:
                 yield name, digest, os.stat(link).st_mtime
             except OSError:
                 continue
+
+    def cached_at(self, repo, digest):
+        """When this repository first stored a manifest, or None.
+
+        The registry writes a manifest's revision file once, when it first fetches it. The tag file is different:
+        a pull-through registry rewrites it on every tag request, because it re-checks the tag upstream, so its
+        modification time only says when the tag was last requested.
+        """
+        hexd = (digest or "").partition(":")[2]
+        if not HEX64.match(hexd):
+            return None
+        try:
+            return os.stat(os.path.join(self.repo_root, repo, "_manifests", "revisions", "sha256", hexd, "link")).st_mtime
+        except OSError:
+            return None
 
     def _link_digests(self, repo, *parts):
         try:
@@ -756,15 +776,16 @@ def scan_registry(reg, tracker, names):
     for name in store.repositories():
         ctx.downloading = store.uploads_active(name)
         repo_blobs, tags, newest = set(), [], 0.0
-        for tag, digest, mtime in store.tags(name):
+        for tag, digest, touched in store.tags(name):
+            cached_at = store.cached_at(name, digest) or touched
             info, blobs = analyse_tag(store, ctx, digest)
             repo_blobs |= blobs
-            info.update({"name": tag, "updated": mtime,
+            info.update({"name": tag, "updated": cached_at,
                          "size": sum(store.size(b) or 0 for b in blobs)})
             if tracker:
-                info["activity"] = tracker.activity(reg["id"], name, tag, digest, mtime, names)
+                info["activity"] = tracker.activity(reg["id"], name, tag, digest, cached_at, names)
             tags.append(info)
-            newest = max(newest, mtime)
+            newest = max(newest, cached_at)
         if not tags:
             continue
         tags.sort(key=lambda t: t["updated"], reverse=True)
@@ -992,8 +1013,8 @@ def eviction_units(memo):
             # Tags that point at the same image are one unit: removing one frees nothing while another holds the
             # layers, and the image is in use if any of its tags is.
             images = {}
-            for tag, digest, cached_at in store.tags(repo):
-                last = TRACKER.last_pull(regid, repo, tag, digest, cached_at, times) if TRACKER else cached_at
+            for tag, digest, touched in store.tags(repo):
+                last = TRACKER.last_pull(regid, repo, tag, digest, touched, times) if TRACKER else touched
                 group = images.setdefault(digest, {"tags": [], "last": 0.0})
                 group["tags"].append(tag)
                 group["last"] = max(group["last"], last)
